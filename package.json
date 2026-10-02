@@ -1,0 +1,14 @@
+{
+  "name": "ledger",
+  "private": true,
+  "scripts": {
+    "format:api": "pnpm --filter api run format",
+    "dev:api": "pnpm --filter api start:dev",
+    "dev:web": "pnpm --filter web dev",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:generate": "pnpm --filter api exec prisma generate",
+    "db:migrate": "pnpm --filter api exec prisma migrate dev",
+    "db:studio": "pnpm --filter api exec prisma studio"
+  }
+}

@@ -1,0 +1,123 @@
+generator client {
+    provider     = "prisma-client"
+    output       = "../src/generated/prisma"
+    moduleFormat = "cjs"
+}
+
+datasource db {
+    provider = "postgresql"
+}
+
+model User {
+    id           String   @id @default(uuid())
+    email        String   @unique
+    passwordHash String
+    createdAt    DateTime @default(now())
+
+    wallets      Wallet[]
+    transactions Transaction[]
+    webhooks     WebhookEndpoint[]
+}
+
+model Wallet {
+    id        String   @id @default(uuid())
+    userId    String?
+    currency  String
+    balance   BigInt   @default(0)
+    isSystem  Boolean  @default(false)
+    createdAt DateTime @default(now())
+
+    user    User?         @relation(fields: [userId], references: [id])
+    entries LedgerEntry[]
+
+    @@index([userId])
+}
+
+model Transaction {
+    id             String            @id @default(uuid())
+    type           TransactionType
+    status         TransactionStatus
+    amount         BigInt
+    currency       String
+    idempotencyKey String
+    initiatedById  String
+    description    String?
+    failureReason  String?
+    createdAt      DateTime          @default(now())
+
+    initiatedBy User          @relation(fields: [initiatedById], references: [id])
+    entries     LedgerEntry[]
+
+    @@unique([initiatedById, idempotencyKey])
+    @@index([initiatedById, createdAt])
+}
+
+model LedgerEntry {
+    id            String    @id @default(uuid())
+    transactionId String
+    walletId      String
+    direction     Direction
+    amount        BigInt
+    balanceAfter  BigInt
+    createdAt     DateTime  @default(now())
+
+    transaction Transaction @relation(fields: [transactionId], references: [id])
+    wallet      Wallet      @relation(fields: [walletId], references: [id])
+
+    @@index([walletId, createdAt])
+    @@index([transactionId])
+}
+
+model WebhookEndpoint {
+    id        String   @id @default(uuid())
+    userId    String
+    url       String
+    secret    String
+    events    String[]
+    active    Boolean  @default(true)
+    createdAt DateTime @default(now())
+
+    user       User              @relation(fields: [userId], references: [id])
+    deliveries WebhookDelivery[]
+
+    @@index([userId])
+}
+
+model WebhookDelivery {
+    id            String         @id @default(uuid())
+    endpointId    String
+    event         String
+    payload       Json
+    status        DeliveryStatus @default(PENDING)
+    attempts      Int            @default(0)
+    lastError     String?
+    nextAttemptAt DateTime?
+    createdAt     DateTime       @default(now())
+
+    endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id])
+
+    @@index([endpointId, status])
+}
+
+enum TransactionType {
+    DEPOSIT
+    TRANSFER
+    REVERSAL
+}
+
+enum TransactionStatus {
+    PENDING
+    COMPLETED
+    FAILED
+}
+
+enum Direction {
+    DEBIT
+    CREDIT
+}
+
+enum DeliveryStatus {
+    PENDING
+    SUCCESS
+    FAILED
+}
