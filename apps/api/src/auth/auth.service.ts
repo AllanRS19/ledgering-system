@@ -1,7 +1,7 @@
 import { PasswordHasher } from '@nestjs/authentication';
 import { ConflictException, Injectable } from '@nestjs/common';
-import type { User } from 'src/users/types/user.types';
-import { UsersService } from 'src/users/users.service';
+import { UsersService } from '../users/users.service';
+import type { User } from '../users/types/user.types';
 
 @Injectable()
 export class AuthService {

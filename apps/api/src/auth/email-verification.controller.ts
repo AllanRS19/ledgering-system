@@ -11,9 +11,9 @@ import {
   HttpCode,
   Post,
 } from '@nestjs/common';
-import type { User } from 'src/users/types/user.types';
 import { VerifyEmailDto } from './dto/auth.dto';
 import { minutes, Throttle } from '@nestjs/throttler';
+import type { User } from '../users/types/user.types';
 
 @Controller('auth/email')
 export class EmailVerificationController {

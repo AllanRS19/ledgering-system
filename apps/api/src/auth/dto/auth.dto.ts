@@ -6,7 +6,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { normalizeEmail } from 'src/common/helpers';
+import { normalizeEmail } from '../../common/helpers';
 
 const toNormalizedEmail = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? normalizeEmail(value) : value;

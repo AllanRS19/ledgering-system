@@ -1,7 +1,7 @@
 import { Injectable, ConflictException } from '@nestjs/common';
-import { PrismaService } from 'src/prisma/prisma.service';
 import { User } from './types/user.types';
-import { isUniqueViolation, normalizeEmail } from 'src/common/helpers';
+import { PrismaService } from '../prisma/prisma.service';
+import { isUniqueViolation, normalizeEmail } from '../common/helpers';
 
 // The only fields allowed to leave this service. Never includes passwordHash
 const userSelect = {

@@ -4,8 +4,8 @@ import {
   SessionRecord,
 } from '@nestjs/authentication';
 import { Injectable } from '@nestjs/common';
-import { UsersService } from 'src/users/users.service';
-import type { User } from 'src/users/types/user.types';
+import { UsersService } from '../users/users.service';
+import type { User } from '../users/types/user.types';
 
 @Injectable()
 export class SessionAuth extends SessionCookieProvider<User> {
