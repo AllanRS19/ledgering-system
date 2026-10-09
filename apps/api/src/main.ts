@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { ConfigService } from '@nestjs/config';
 
 declare global {
   interface BigInt {
@@ -17,6 +18,7 @@ BigInt.prototype.toJSON = function (this: bigint) {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const config = app.get(ConfigService);
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -26,7 +28,11 @@ async function bootstrap() {
     }),
   );
 
-  app.enableCors({ origin: process.env.WEB_URL ?? 'http://localhost:3000' });
+  // The session cookie only travels cross-origin with credentials enabled.
+  app.enableCors({
+    origin: config.getOrThrow<string>('APP_URL'),
+    credentials: true,
+  });
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Ledgering System API')
@@ -36,10 +42,11 @@ async function bootstrap() {
     .setVersion('1.0')
     .addBearerAuth()
     .build();
+
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
 
-  const port = process.env.PORT ?? 4000;
+  const port = Number(config.get<number>('PORT') ?? 4000);
   await app.listen(port);
   console.log(`API running on http://localhost:${port}`);
   console.log(`Swagger docs on http://localhost:${port}/docs`);
