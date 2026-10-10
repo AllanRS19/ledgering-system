@@ -20,6 +20,10 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
 
+  app.setGlobalPrefix('api/v1', {
+    exclude: ['/health'],
+  });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -40,16 +44,15 @@ async function bootstrap() {
       'Double-entry wallet ledger with idempotent transfers and webhooks',
     )
     .setVersion('1.0')
-    .addBearerAuth()
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('docs', app, document);
+  SwaggerModule.setup('docs', app, document, { useGlobalPrefix: true });
 
   const port = Number(config.get<number>('PORT') ?? 4000);
   await app.listen(port);
-  console.log(`API running on http://localhost:${port}`);
-  console.log(`Swagger docs on http://localhost:${port}/docs`);
+  console.log(`API running on http://localhost:${port}/api/v1`);
+  console.log(`Swagger docs on http://localhost:${port}/api/v1/docs`);
 }
 
 void bootstrap();

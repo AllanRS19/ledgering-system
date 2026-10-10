@@ -1,7 +1,8 @@
 generator client {
-    provider     = "prisma-client"
-    output       = "../src/generated/prisma"
-    moduleFormat = "cjs"
+    provider        = "prisma-client"
+    output          = "../src/generated/prisma"
+    moduleFormat    = "cjs"
+    previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -32,7 +33,8 @@ model Wallet {
     user    User?         @relation(fields: [userId], references: [id])
     entries LedgerEntry[]
 
-    @@index([userId])
+    @@unique([userId, currency])
+    @@unique([currency], where: { isSystem: true })
 }
 
 model Transaction {
