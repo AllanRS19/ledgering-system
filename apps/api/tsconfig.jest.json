@@ -1,0 +1,8 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        // TypeScript 6 no longer infers the root of the source tree, so say where it is.
+        // "." is apps/api, which covers src, test and prisma.config.ts.
+        "rootDir": "."
+    }
+}

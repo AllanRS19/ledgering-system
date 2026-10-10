@@ -15,6 +15,7 @@ import { join } from 'path';
 import { minutes, ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { AuthThrottlerGuard } from './auth/auth-throttler.guard';
+import { WalletsModule } from './wallets/wallets.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { AuthThrottlerGuard } from './auth/auth-throttler.guard';
     }),
     UsersModule,
     AuthModule,
+    WalletsModule,
   ],
   controllers: [HealthController],
   providers: [
