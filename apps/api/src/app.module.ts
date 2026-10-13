@@ -13,9 +13,11 @@ import {
 } from '@nestjs/mail';
 import { join } from 'path';
 import { minutes, ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AuthThrottlerGuard } from './auth/auth-throttler.guard';
 import { WalletsModule } from './wallets/wallets.module';
+import { TransactionsModule } from './transactions/transactions.module';
+import { LedgerExceptionFilter } from './ledger/ledger-exception.filter';
 
 @Module({
   imports: [
@@ -68,12 +70,14 @@ import { WalletsModule } from './wallets/wallets.module';
     UsersModule,
     AuthModule,
     WalletsModule,
+    TransactionsModule,
   ],
   controllers: [HealthController],
   providers: [
     // Registered in the root module so it runs before the authentication
     // guard: guessed credentials count against the limit too.
     { provide: APP_GUARD, useClass: AuthThrottlerGuard },
+    { provide: APP_FILTER, useClass: LedgerExceptionFilter },
   ],
 })
 export class AppModule {}

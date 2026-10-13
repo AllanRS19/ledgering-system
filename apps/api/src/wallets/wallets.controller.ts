@@ -1,4 +1,4 @@
-import { CurrentUser } from '@nestjs/authentication';
+import { Authenticate, CurrentUser } from '@nestjs/authentication';
 import {
   Body,
   Controller,
@@ -11,6 +11,7 @@ import type { User } from '../users/types/user.types';
 import { WalletsService } from './wallets.service';
 import { CreateWalletDto } from './dto/wallets.dto';
 
+@Authenticate({ verifiedEmail: true })
 @Controller('wallets')
 export class WalletsController {
   constructor(private readonly walletsService: WalletsService) {}
