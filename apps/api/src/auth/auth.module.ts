@@ -5,10 +5,15 @@ import { AuthService } from './auth.service';
 import { EmailVerificationMailer } from './email-verification.mailer';
 import { EmailVerificationController } from './email-verification.controller';
 import { UsersModule } from '../users/users.module';
+import { SessionsController } from './sessions.controller';
 
 @Module({
   imports: [UsersModule],
-  controllers: [AuthController, EmailVerificationController],
+  controllers: [
+    AuthController,
+    EmailVerificationController,
+    SessionsController,
+  ],
   providers: [SessionAuth, AuthService, EmailVerificationMailer],
 })
 export class AuthModule {}
