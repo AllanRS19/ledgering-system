@@ -4,6 +4,7 @@ import { DepositFundsDto } from './dto/deposit.dto';
 import { TransactionsService } from './transactions.service';
 import type { User } from '../users/types/user.types';
 import { IdempotencyKey } from '../common/decorators/idempotency-key.decorator';
+import { TransferFundsDto } from './dto/transfer.dto';
 
 @Authenticate({ verifiedEmail: true })
 @Controller('transactions')
@@ -22,6 +23,22 @@ export class TransactionsController {
       userId: user.id,
       walletId: dto.walletId,
       amount: BigInt(dto.amount),
+      idempotencyKey,
+    });
+  }
+
+  @Post('transfers')
+  transfer(
+    @Body() dto: TransferFundsDto,
+    @CurrentUser() user: User,
+    @IdempotencyKey() idempotencyKey: string,
+  ) {
+    return this.transactionsService.transferFunds({
+      userId: user.id,
+      sourceWalletId: dto.sourceWalletId,
+      destinationWalletId: dto.destinationWalletId,
+      amount: BigInt(dto.amount),
+      description: dto.description,
       idempotencyKey,
     });
   }
