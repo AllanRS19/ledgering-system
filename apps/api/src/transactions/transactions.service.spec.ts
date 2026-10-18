@@ -1,5 +1,4 @@
 import {
-  ConflictException,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -9,6 +8,9 @@ import {
   UnbalancedPostingError,
 } from '../ledger/ledger.errors';
 import type { PrismaService } from '../prisma/prisma.service';
+import { IdempotencyKeyReusedException } from './idempotency-key-reused.exception';
+import { InsufficientFundsReplayException } from './insufficient-funds-replay.exception';
+import { hashRequest } from './request-hash';
 import { TransactionsService } from './transactions.service';
 import type {
   PlannedEntry,
@@ -26,6 +28,10 @@ jest.mock('../prisma/prisma.service', () => ({
 
 const USER_ID = 'user-1';
 const NOW = new Date('2026-01-01T00:00:00.000Z');
+
+/** What Prisma throws when a unique rule is broken. */
+const uniqueViolation = () =>
+  Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
 
 /** Fresh fakes for every test. */
 function setup() {
@@ -53,11 +59,18 @@ function setup() {
   const ledger = {
     post: jest.fn<Promise<PlannedEntry[]>, [unknown, PostingRequest]>(),
   };
-  // Only $transaction: any direct use of prisma.wallet etc. would throw.
+  // $transaction, plus the one lookup that runs OUTSIDE the transaction (to
+  // find a transaction that already has this key). There is no `wallet`
+  // here: any direct use of prisma.wallet would throw.
   const prisma = {
     $transaction: jest.fn((callback: (client: typeof tx) => Promise<unknown>) =>
       callback(tx),
     ),
+    transaction: {
+      findUnique: jest
+        .fn<Promise<unknown>, [unknown]>()
+        .mockResolvedValue(null),
+    },
   };
 
   const service = new TransactionsService(
@@ -70,6 +83,21 @@ function setup() {
 
 type Mocks = ReturnType<typeof setup>;
 
+/** The arguments of the first ledger.post(...) call, with real types. */
+function firstPostCall(ledger: Mocks['ledger']): {
+  tx: unknown;
+  request: PostingRequest;
+} {
+  const call = ledger.post.mock.calls[0] as
+    [unknown, PostingRequest] | undefined;
+
+  if (!call) {
+    throw new Error('ledger.post was never called');
+  }
+
+  return { tx: call[0], request: call[1] };
+}
+
 // ---------------------------------------------------------------------------
 // Deposits
 // ---------------------------------------------------------------------------
@@ -81,6 +109,12 @@ describe('TransactionsService.depositFunds', () => {
     amount: 5000n,
     idempotencyKey: 'key-1',
   };
+
+  const depositHash = hashRequest({
+    type: 'DEPOSIT',
+    walletId: 'wallet-1',
+    amount: 5000n,
+  });
 
   const userWallet = {
     id: 'wallet-1',
@@ -120,6 +154,24 @@ describe('TransactionsService.depositFunds', () => {
     },
   ];
 
+  /** A deposit that was already recorded, as the lookup returns it. */
+  const storedDeposit = (overrides: Record<string, unknown> = {}) => ({
+    id: 'tx-1',
+    type: 'DEPOSIT',
+    status: 'COMPLETED',
+    amount: 5000n,
+    currency: 'USD',
+    description: null,
+    failureReason: null,
+    requestHash: depositHash,
+    createdAt: NOW,
+    entries: [
+      { walletId: 'funding-1', balanceAfter: -5000n },
+      { walletId: 'wallet-1', balanceAfter: 5000n },
+    ],
+    ...overrides,
+  });
+
   /** The normal case: both wallets exist and the ledger accepts the posting. */
   function primeHappyPath({ tx, ledger }: Mocks) {
     tx.wallet.findFirst
@@ -133,19 +185,22 @@ describe('TransactionsService.depositFunds', () => {
     const mocks = setup();
     primeHappyPath(mocks);
 
-    const result = await mocks.service.depositFunds(payload);
+    const outcome = await mocks.service.depositFunds(payload);
 
     // toEqual on the whole object also proves nothing extra is returned,
     // such as the funding wallet's id or the raw ledger entries.
-    expect(result).toEqual({
-      id: 'tx-1',
-      type: 'DEPOSIT',
-      status: 'COMPLETED',
-      amount: 5000n,
-      currency: 'USD',
-      walletId: 'wallet-1',
-      balanceAfter: 5000n,
-      createdAt: NOW,
+    expect(outcome).toEqual({
+      replayed: false,
+      result: {
+        id: 'tx-1',
+        type: 'DEPOSIT',
+        status: 'COMPLETED',
+        amount: 5000n,
+        currency: 'USD',
+        walletId: 'wallet-1',
+        balanceAfter: 5000n,
+        createdAt: NOW,
+      },
     });
   });
 
@@ -191,11 +246,11 @@ describe('TransactionsService.depositFunds', () => {
     const [createArgs] = mocks.tx.transaction.create.mock.calls[0];
     expect(createArgs.data.currency).toBe('EUR');
 
-    const [, request] = mocks.ledger.post.mock.calls[0];
+    const { request } = firstPostCall(mocks.ledger);
     expect(request.currency).toBe('EUR');
   });
 
-  it('records the deposit as a completed DEPOSIT with the idempotency key', async () => {
+  it('records a completed DEPOSIT with its idempotency key and request fingerprint', async () => {
     const mocks = setup();
     primeHappyPath(mocks);
 
@@ -208,6 +263,7 @@ describe('TransactionsService.depositFunds', () => {
         amount: 5000n,
         currency: 'USD',
         idempotencyKey: 'key-1',
+        requestHash: depositHash,
         initiatedById: USER_ID,
       },
     });
@@ -219,7 +275,7 @@ describe('TransactionsService.depositFunds', () => {
 
     await mocks.service.depositFunds(payload);
 
-    const [txArgument, request] = mocks.ledger.post.mock.calls[0];
+    const { tx: txArgument, request } = firstPostCall(mocks.ledger);
 
     // It must receive the transaction client, never open its own.
     expect(txArgument).toBe(mocks.tx);
@@ -277,23 +333,6 @@ describe('TransactionsService.depositFunds', () => {
       expect(mocks.ledger.post).not.toHaveBeenCalled();
     });
 
-    it('answers 409 when the idempotency key was already used', async () => {
-      const mocks = setup();
-      mocks.tx.wallet.findFirst
-        .mockResolvedValueOnce(userWallet)
-        .mockResolvedValueOnce(fundingWallet);
-      // What Prisma throws when a unique rule is broken.
-      mocks.tx.transaction.create.mockRejectedValue(
-        Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }),
-      );
-
-      await expect(mocks.service.depositFunds(payload)).rejects.toBeInstanceOf(
-        ConflictException,
-      );
-
-      expect(mocks.ledger.post).not.toHaveBeenCalled();
-    });
-
     it('lets ledger errors through untouched, for the exception filter to translate', async () => {
       const mocks = setup();
       mocks.tx.wallet.findFirst
@@ -307,17 +346,6 @@ describe('TransactionsService.depositFunds', () => {
       );
     });
 
-    it('does not mistake other errors for a duplicate key', async () => {
-      const mocks = setup();
-      const boom = new Error('boom');
-      mocks.tx.wallet.findFirst
-        .mockResolvedValueOnce(userWallet)
-        .mockResolvedValueOnce(fundingWallet);
-      mocks.tx.transaction.create.mockRejectedValue(boom);
-
-      await expect(mocks.service.depositFunds(payload)).rejects.toBe(boom);
-    });
-
     it('fails loudly if the ledger returns no entry for the user wallet', async () => {
       const mocks = setup();
       mocks.tx.wallet.findFirst
@@ -329,6 +357,161 @@ describe('TransactionsService.depositFunds', () => {
       await expect(mocks.service.depositFunds(payload)).rejects.toThrow(
         'The ledger returned no entry for wallet wallet-1',
       );
+    });
+  });
+
+  describe('idempotency', () => {
+    it("looks for an existing transaction by the caller's id and the key", async () => {
+      const mocks = setup();
+      primeHappyPath(mocks);
+
+      await mocks.service.depositFunds(payload);
+
+      const [args] = mocks.prisma.transaction.findUnique.mock.calls[0];
+      expect(args).toMatchObject({
+        where: {
+          initiatedById_idempotencyKey: {
+            initiatedById: USER_ID,
+            idempotencyKey: 'key-1',
+          },
+        },
+      });
+    });
+
+    it('replays a finished deposit without opening a transaction or touching the ledger', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(storedDeposit());
+
+      const outcome = await mocks.service.depositFunds(payload);
+
+      // The balance is the one from back then (5000), not the current one.
+      expect(outcome).toEqual({
+        replayed: true,
+        result: {
+          id: 'tx-1',
+          type: 'DEPOSIT',
+          status: 'COMPLETED',
+          amount: 5000n,
+          currency: 'USD',
+          walletId: 'wallet-1',
+          balanceAfter: 5000n,
+          createdAt: NOW,
+        },
+      });
+      expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('rejects the same key with a different request, and touches nothing', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedDeposit({
+          requestHash: hashRequest({
+            type: 'DEPOSIT',
+            walletId: 'wallet-1',
+            amount: 9999n,
+          }),
+        }),
+      );
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toBeInstanceOf(
+        IdempotencyKeyReusedException,
+      );
+
+      expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('rejects a key that was first used for a transfer', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedDeposit({
+          type: 'TRANSFER',
+          requestHash: hashRequest({
+            type: 'TRANSFER',
+            sourceWalletId: 'wallet-1',
+            destinationWalletId: 'wallet-2',
+            amount: 5000n,
+          }),
+        }),
+      );
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toBeInstanceOf(
+        IdempotencyKeyReusedException,
+      );
+    });
+
+    it('fails loudly when a stored deposit is not COMPLETED', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedDeposit({ status: 'PENDING' }),
+      );
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toThrow(
+        'was found with status PENDING',
+      );
+    });
+
+    it('replays the winner when another request with the same key commits first', async () => {
+      const mocks = setup();
+      // Nothing there at first. After the insert loses the race, it is.
+      mocks.prisma.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(storedDeposit());
+      mocks.tx.wallet.findFirst
+        .mockResolvedValueOnce(userWallet)
+        .mockResolvedValueOnce(fundingWallet);
+      mocks.tx.transaction.create.mockRejectedValue(uniqueViolation());
+
+      const outcome = await mocks.service.depositFunds(payload);
+
+      expect(outcome.replayed).toBe(true);
+      expect(outcome.result.balanceAfter).toBe(5000n);
+      // The lookup after the failure runs outside the aborted transaction.
+      expect(mocks.prisma.transaction.findUnique).toHaveBeenCalledTimes(2);
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the request that won the race was a different one', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          storedDeposit({ requestHash: 'something-else' }),
+        );
+      mocks.tx.wallet.findFirst
+        .mockResolvedValueOnce(userWallet)
+        .mockResolvedValueOnce(fundingWallet);
+      mocks.tx.transaction.create.mockRejectedValue(uniqueViolation());
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toBeInstanceOf(
+        IdempotencyKeyReusedException,
+      );
+    });
+
+    it('rethrows the original error when a unique violation finds no winner', async () => {
+      const mocks = setup();
+      const error = uniqueViolation();
+      mocks.tx.wallet.findFirst
+        .mockResolvedValueOnce(userWallet)
+        .mockResolvedValueOnce(fundingWallet);
+      mocks.tx.transaction.create.mockRejectedValue(error);
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toBe(error);
+    });
+
+    it('does not mistake other errors for a duplicate key', async () => {
+      const mocks = setup();
+      const boom = new Error('boom');
+      mocks.tx.wallet.findFirst
+        .mockResolvedValueOnce(userWallet)
+        .mockResolvedValueOnce(fundingWallet);
+      mocks.tx.transaction.create.mockRejectedValue(boom);
+
+      await expect(mocks.service.depositFunds(payload)).rejects.toBe(boom);
+
+      // Only the fast-path lookup ran: no second lookup for a non-duplicate.
+      expect(mocks.prisma.transaction.findUnique).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -346,6 +529,14 @@ describe('TransactionsService.transferFunds', () => {
     description: 'rent',
     idempotencyKey: 'key-1',
   };
+
+  const transferHash = hashRequest({
+    type: 'TRANSFER',
+    sourceWalletId: 'wallet-alice',
+    destinationWalletId: 'wallet-bob',
+    amount: 3000n,
+    description: 'rent',
+  });
 
   const aliceWallet = { id: 'wallet-alice', userId: USER_ID, currency: 'USD' };
   const bobWallet = { id: 'wallet-bob', userId: 'user-2', currency: 'USD' };
@@ -377,6 +568,24 @@ describe('TransactionsService.transferFunds', () => {
     },
   ];
 
+  /** A transfer that was already recorded, as the lookup returns it. */
+  const storedTransfer = (overrides: Record<string, unknown> = {}) => ({
+    id: 'tx-2',
+    type: 'TRANSFER',
+    status: 'COMPLETED',
+    amount: 3000n,
+    currency: 'USD',
+    description: 'rent',
+    failureReason: null,
+    requestHash: transferHash,
+    createdAt: NOW,
+    entries: [
+      { walletId: 'wallet-alice', balanceAfter: 7000n },
+      { walletId: 'wallet-bob', balanceAfter: 8000n },
+    ],
+    ...overrides,
+  });
+
   /** The normal case: both wallets exist and the ledger accepts the posting. */
   function primeHappyPath({ tx, ledger }: Mocks) {
     tx.wallet.findMany.mockResolvedValue([aliceWallet, bobWallet]);
@@ -397,20 +606,23 @@ describe('TransactionsService.transferFunds', () => {
     const mocks = setup();
     primeHappyPath(mocks);
 
-    const result = await mocks.service.transferFunds(payload);
+    const outcome = await mocks.service.transferFunds(payload);
 
     // balanceAfter is the sender's 7000, never the recipient's 8000.
-    expect(result).toEqual({
-      id: 'tx-2',
-      type: 'TRANSFER',
-      status: 'COMPLETED',
-      amount: 3000n,
-      currency: 'USD',
-      sourceWalletId: 'wallet-alice',
-      destinationWalletId: 'wallet-bob',
-      description: 'rent',
-      balanceAfter: 7000n,
-      createdAt: NOW,
+    expect(outcome).toEqual({
+      replayed: false,
+      result: {
+        id: 'tx-2',
+        type: 'TRANSFER',
+        status: 'COMPLETED',
+        amount: 3000n,
+        currency: 'USD',
+        sourceWalletId: 'wallet-alice',
+        destinationWalletId: 'wallet-bob',
+        description: 'rent',
+        balanceAfter: 7000n,
+        createdAt: NOW,
+      },
     });
   });
 
@@ -446,7 +658,7 @@ describe('TransactionsService.transferFunds', () => {
     });
   });
 
-  it('records a PENDING TRANSFER with the description and the idempotency key', async () => {
+  it('records a PENDING TRANSFER with the description, key and request fingerprint', async () => {
     const mocks = setup();
     primeHappyPath(mocks);
 
@@ -460,6 +672,7 @@ describe('TransactionsService.transferFunds', () => {
         currency: 'USD',
         description: 'rent',
         idempotencyKey: 'key-1',
+        requestHash: transferHash,
         initiatedById: USER_ID,
       },
     });
@@ -471,7 +684,7 @@ describe('TransactionsService.transferFunds', () => {
 
     await mocks.service.transferFunds(payload);
 
-    const [txArgument, request] = mocks.ledger.post.mock.calls[0];
+    const { tx: txArgument, request } = firstPostCall(mocks.ledger);
 
     // It must receive the transaction client, never open its own.
     expect(txArgument).toBe(mocks.tx);
@@ -515,7 +728,7 @@ describe('TransactionsService.transferFunds', () => {
       expect(ledger.post).not.toHaveBeenCalled();
     }
 
-    it('answers 422 for the same wallet, without even opening a transaction', async () => {
+    it('answers 422 for the same wallet, without a lookup or a transaction', async () => {
       const mocks = setup();
 
       await expect(
@@ -525,6 +738,7 @@ describe('TransactionsService.transferFunds', () => {
         }),
       ).rejects.toBeInstanceOf(UnprocessableEntityException);
 
+      expect(mocks.prisma.transaction.findUnique).not.toHaveBeenCalled();
       expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -656,20 +870,6 @@ describe('TransactionsService.transferFunds', () => {
       );
     });
 
-    it('answers 409 when the idempotency key was already used', async () => {
-      const mocks = setup();
-      mocks.tx.wallet.findMany.mockResolvedValue([aliceWallet, bobWallet]);
-      mocks.tx.transaction.create.mockRejectedValue(
-        Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }),
-      );
-
-      await expect(mocks.service.transferFunds(payload)).rejects.toBeInstanceOf(
-        ConflictException,
-      );
-
-      expect(mocks.ledger.post).not.toHaveBeenCalled();
-    });
-
     it('does not mistake other errors for a duplicate key', async () => {
       const mocks = setup();
       const boom = new Error('boom');
@@ -677,6 +877,8 @@ describe('TransactionsService.transferFunds', () => {
       mocks.tx.transaction.create.mockRejectedValue(boom);
 
       await expect(mocks.service.transferFunds(payload)).rejects.toBe(boom);
+
+      expect(mocks.prisma.transaction.findUnique).toHaveBeenCalledTimes(1);
     });
 
     it('fails loudly if the ledger returns no entry for the source wallet', async () => {
@@ -688,6 +890,155 @@ describe('TransactionsService.transferFunds', () => {
       await expect(mocks.service.transferFunds(payload)).rejects.toThrow(
         'The ledger returned no entry for wallet wallet-alice',
       );
+    });
+  });
+
+  describe('idempotency', () => {
+    it('replays a finished transfer without opening a transaction or touching the ledger', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(storedTransfer());
+
+      const outcome = await mocks.service.transferFunds(payload);
+
+      // The sender's balance back then (7000), and nothing about Bob's.
+      expect(outcome).toEqual({
+        replayed: true,
+        result: {
+          id: 'tx-2',
+          type: 'TRANSFER',
+          status: 'COMPLETED',
+          amount: 3000n,
+          currency: 'USD',
+          sourceWalletId: 'wallet-alice',
+          destinationWalletId: 'wallet-bob',
+          description: 'rent',
+          balanceAfter: 7000n,
+          createdAt: NOW,
+        },
+      });
+      expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('replays a failed transfer as the same 422, without touching the ledger', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedTransfer({
+          status: 'FAILED',
+          failureReason: 'INSUFFICIENT_FUNDS',
+          entries: [],
+        }),
+      );
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toBeInstanceOf(
+        InsufficientFundsReplayException,
+      );
+
+      expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('fails loudly when a transfer failed for a reason it does not know', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedTransfer({
+          status: 'FAILED',
+          failureReason: 'SOMETHING_NEW',
+          entries: [],
+        }),
+      );
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toThrow(
+        'failed for an unknown reason: SOMETHING_NEW',
+      );
+    });
+
+    it('fails loudly when a stored transfer is still PENDING', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedTransfer({ status: 'PENDING', entries: [] }),
+      );
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toThrow(
+        'was found with status PENDING',
+      );
+    });
+
+    it.each([
+      ['a different amount', { amount: 9999n }],
+      ['a different destination', { destinationWalletId: 'wallet-carol' }],
+      ['a different description', { description: 'groceries' }],
+    ])('rejects the same key with %s', async (_label, change) => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(storedTransfer());
+
+      await expect(
+        mocks.service.transferFunds({ ...payload, ...change }),
+      ).rejects.toBeInstanceOf(IdempotencyKeyReusedException);
+
+      expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a key that was first used for a deposit', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique.mockResolvedValue(
+        storedTransfer({
+          type: 'DEPOSIT',
+          requestHash: hashRequest({
+            type: 'DEPOSIT',
+            walletId: 'wallet-alice',
+            amount: 3000n,
+          }),
+        }),
+      );
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toBeInstanceOf(
+        IdempotencyKeyReusedException,
+      );
+    });
+
+    it('replays the winner when another request with the same key commits first', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(storedTransfer());
+      mocks.tx.wallet.findMany.mockResolvedValue([aliceWallet, bobWallet]);
+      mocks.tx.transaction.create.mockRejectedValue(uniqueViolation());
+
+      const outcome = await mocks.service.transferFunds(payload);
+
+      expect(outcome.replayed).toBe(true);
+      expect(outcome.result.balanceAfter).toBe(7000n);
+      expect(mocks.prisma.transaction.findUnique).toHaveBeenCalledTimes(2);
+      expect(mocks.ledger.post).not.toHaveBeenCalled();
+    });
+
+    it('replays the failure when the winner of the race was a failed transfer', async () => {
+      const mocks = setup();
+      mocks.prisma.transaction.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          storedTransfer({
+            status: 'FAILED',
+            failureReason: 'INSUFFICIENT_FUNDS',
+            entries: [],
+          }),
+        );
+      mocks.tx.wallet.findMany.mockResolvedValue([aliceWallet, bobWallet]);
+      mocks.tx.transaction.create.mockRejectedValue(uniqueViolation());
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toBeInstanceOf(
+        InsufficientFundsReplayException,
+      );
+    });
+
+    it('rethrows the original error when a unique violation finds no winner', async () => {
+      const mocks = setup();
+      const error = uniqueViolation();
+      mocks.tx.wallet.findMany.mockResolvedValue([aliceWallet, bobWallet]);
+      mocks.tx.transaction.create.mockRejectedValue(error);
+
+      await expect(mocks.service.transferFunds(payload)).rejects.toBe(error);
     });
   });
 });

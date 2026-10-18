@@ -44,6 +44,7 @@ model Transaction {
     amount         BigInt
     currency       String
     idempotencyKey String
+    requestHash    String
     initiatedById  String
     description    String?
     failureReason  String?

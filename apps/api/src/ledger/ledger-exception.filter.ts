@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { INSUFFICIENT_FUNDS_MESSAGE } from './ledger-client-messages';
 import {
   CurrencyMismatchError,
   InsufficientFundsError,
@@ -22,7 +23,6 @@ import {
  * The ledger's own messages carry internal ids and balances, so they are
  * never sent to the client.
  */
-
 @Catch(LedgerError)
 export class LedgerExceptionFilter implements ExceptionFilter<LedgerError> {
   private readonly logger = new Logger(LedgerExceptionFilter.name);
@@ -35,7 +35,7 @@ export class LedgerExceptionFilter implements ExceptionFilter<LedgerError> {
         response,
         HttpStatus.UNPROCESSABLE_ENTITY,
         exception.code,
-        'Insufficient funds for this operation',
+        INSUFFICIENT_FUNDS_MESSAGE,
       );
       return;
     }
@@ -55,7 +55,6 @@ export class LedgerExceptionFilter implements ExceptionFilter<LedgerError> {
       `${exception.name} [${exception.code}]: ${exception.message}`,
       exception.stack,
     );
-
     this.send(
       response,
       HttpStatus.INTERNAL_SERVER_ERROR,
