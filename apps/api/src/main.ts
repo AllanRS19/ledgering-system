@@ -36,6 +36,9 @@ async function bootstrap() {
   app.enableCors({
     origin: config.getOrThrow<string>('APP_URL'),
     credentials: true,
+    // Browers only let JavaScript read response headers listed here, and the
+    // web app needs to know when an answer is a replay
+    exposedHeaders: ['Idempotent-Replayed'],
   });
 
   const swaggerConfig = new DocumentBuilder()

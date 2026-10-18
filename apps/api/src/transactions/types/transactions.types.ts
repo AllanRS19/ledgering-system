@@ -56,3 +56,27 @@ export interface TransferResult {
 export type TransferOutcome =
   | { kind: 'completed'; result: TransferResult }
   | { kind: 'failed'; error: InsufficientFundsError };
+
+/**
+ * What the service hands to the controller: the result, and whether it is the
+ * replay of an earlier identical request (the controller marks those with a
+ * response header).
+ */
+export interface IdempotentResult<T> {
+  result: T;
+  replayed: boolean;
+}
+
+/** A transaction found by its Idempotency-Key: only the fields a replay needs. */
+export interface StoredTransaction {
+  id: string;
+  type: string;
+  status: string;
+  amount: bigint;
+  currency: string;
+  description: string | null;
+  failureReason: string | null;
+  requestHash: string;
+  createdAt: Date;
+  entries: { walletId: string; balanceAfter: bigint }[];
+}
