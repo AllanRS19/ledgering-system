@@ -22,14 +22,23 @@ import { LedgerExceptionFilter } from './ledger/ledger-exception.filter';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    ThrottlerModule.forRoot([{ ttl: minutes(1), limit: 100 }]),
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => [
+        {
+          ttl: minutes(1),
+          // 100 requests a minute per client by default. Raise it ONLY for
+          // local load tests: a high limit in production defeats the point.
+          limit: Number(configService.get<string>('THROTTLE_LIMIT') ?? 100),
+        },
+      ],
+    }),
     PrismaModule,
     MailModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
-        // Your provider in production. In development, each email (links
-        // included) is printed to the log.
         // Optional: without it, emails (links included) are printed to the log.
         const smtpUrl = configService.get<string>('SMTP_URL');
 
