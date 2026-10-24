@@ -18,6 +18,7 @@ import { AuthThrottlerGuard } from './auth/auth-throttler.guard';
 import { WalletsModule } from './wallets/wallets.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { LedgerExceptionFilter } from './ledger/ledger-exception.filter';
+import { HistoryModule } from './history/history.module';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { LedgerExceptionFilter } from './ledger/ledger-exception.filter';
     AuthModule,
     WalletsModule,
     TransactionsModule,
+    HistoryModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -38,17 +38,19 @@ model Wallet {
 }
 
 model Transaction {
-    id             String            @id @default(uuid())
-    type           TransactionType
-    status         TransactionStatus
-    amount         BigInt
-    currency       String
-    idempotencyKey String
-    requestHash    String
-    initiatedById  String
-    description    String?
-    failureReason  String?
-    createdAt      DateTime          @default(now())
+    id                  String            @id @default(uuid())
+    type                TransactionType
+    status              TransactionStatus
+    amount              BigInt
+    currency            String
+    idempotencyKey      String
+    requestHash         String
+    initiatedById       String
+    sourceWalletId      String?
+    destinationWalletId String?
+    description         String?
+    failureReason       String?
+    createdAt           DateTime          @default(now())
 
     initiatedBy User          @relation(fields: [initiatedById], references: [id])
     entries     LedgerEntry[]
@@ -64,12 +66,12 @@ model LedgerEntry {
     direction     Direction
     amount        BigInt
     balanceAfter  BigInt
-    createdAt     DateTime  @default(now())
+    postedAt      DateTime  @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
 
     transaction Transaction @relation(fields: [transactionId], references: [id])
     wallet      Wallet      @relation(fields: [walletId], references: [id])
 
-    @@index([walletId, createdAt])
+    @@index([walletId, postedAt])
     @@index([transactionId])
 }
 
